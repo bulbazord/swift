@@ -50,3 +50,7 @@ if(SWIFT_HOST_VARIANT STREQUAL "macosx")
 endif()
 
 add_swift_tool_subdirectory(swift-reflection-dump)
+
+if(SWIFT_BUILD_COMPILER_DYLIB)
+  add_swift_tool_subdirectory(swift-shlib)
+endif()
