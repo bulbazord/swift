@@ -2,8 +2,9 @@
 llvm_map_components_to_libnames(llvm_libraries "all")
 # tblgen libraries are only useful for building. It serves no purpose in the
 # dylib.
+message(FATAL_ERROR "llvm libs: ${llvm_libraries}")
 list(REMOVE_ITEM llvm_libraries "LLVMTableGen")
-list(REMOVE_DUPLICATES llvm_libraries )
+list(REMOVE_DUPLICATES llvm_libraries)
 
 # Compute the clang libraries to include.
 # CLANG_EXPORTED_TARGETS includes non-library targets. Filter them out.
@@ -64,7 +65,9 @@ endforeach()
 list(REMOVE_ITEM swift_libraries "swiftCompilerStub")
 list(REMOVE_DUPLICATES swift_libraries)
 
-file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/links.txt" "${swift_libraries}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/llvm.txt" "${llvm_libraries}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/clang.txt" "${clang_libraries}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/swift.txt" "${swift_libraries}")
 
 add_swift_host_library(SwiftCompilerShared SHARED
   libswiftcompiler.cpp
