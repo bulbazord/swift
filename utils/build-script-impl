@@ -196,6 +196,7 @@ KNOWN_SETTINGS=(
     lldb-test-swift-only                          "0"               "when running lldb tests, only include Swift-specific tests"
     lldb-use-system-debugserver                   ""                "don't try to codesign debugserver, and use the system's debugserver instead"
     lldb-configure-tests                          "1"               "if set, will make sure we configure LLDB's test target without running the tests"
+    lldb-dependency-discovery                     ""                "if set, don't build all of LLVM/Clang/Swift before LLDB: configure LLDB in a discovery-only mode to find exactly which of their targets LLDB needs, build only those, then configure and build LLDB for real"
 
     ## LLVM Options
     llvm-enable-lto                               ""                "Must be set to one of 'thin' or 'full'"
@@ -1669,6 +1670,12 @@ for host in "${ALL_HOSTS[@]}"; do
         source_dir=${!source_dir_var}
         build_dir=$(build_directory ${host} ${product})
         build_targets=(all)
+        # BEGIN SWIFT MOD
+        # Set by the swift) case below when LLDB_DEPENDENCY_DISCOVERY is on,
+        # to defer Swift's real build until LLDB's discovery configure has
+        # determined exactly what to build. See the lldb) case.
+        skip_build_this_product=""
+        # END SWIFT MOD
 
         cmake_options=("${common_cmake_options_host[@]}")
 
@@ -2127,6 +2134,16 @@ for host in "${ALL_HOSTS[@]}"; do
                     build_targets=("${build_targets[@]}"
                                    "${SWIFT_BENCHMARK_TARGETS[@]}")
                 fi
+
+                # BEGIN SWIFT MOD
+                # Configure Swift as normal, but don't build it yet: the
+                # lldb) case below runs LLDB's discovery configure against
+                # this (configured but unbuilt) tree and then builds only
+                # the Swift targets LLDB actually needs.
+                if [[ "${LLDB_DEPENDENCY_DISCOVERY}" ]]; then
+                    skip_build_this_product="1"
+                fi
+                # END SWIFT MOD
                 ;;
             lldb)
                 if [ ! -d "${LLDB_SOURCE_DIR}" ]; then
@@ -2282,6 +2299,108 @@ for host in "${ALL_HOSTS[@]}"; do
                         ${LLDB_EXTRA_CMAKE_ARGS}
                         )
                 fi
+
+                # BEGIN SWIFT MOD
+                # Instead of building all of LLVM/Clang/Swift before ever
+                # configuring LLDB, run an LLDB configure-only pass first
+                # that walks the resulting target graph and emits exactly
+                # the LLVM/Clang/Swift targets LLDB needs (see
+                # LLDBDependencyDiscovery.cmake in the llvm-project repo),
+                # then build only those targets. The real LLDB configure
+                # and build below (unchanged) then run against a tree that
+                # already has what LLDB needs.
+                if [[ "${LLDB_DEPENDENCY_DISCOVERY}" ]]; then
+                    # LLDB.framework's build otherwise copies several Swift
+                    # compiler resource directories (apinotes, shims, etc.)
+                    # out of Swift's build tree via POST_BUILD steps attached
+                    # directly to the liblldb target -- not separate CMake
+                    # targets, so, like symlink_clang_headers below, there is
+                    # no target-graph edge discovery could ever walk to find
+                    # them. Unlike symlink_clang_headers, this copy is only
+                    # there so an uninstalled, at-desk LLDB.framework can find
+                    # Swift resources for testing; a real, toolchain-installed
+                    # LLDB finds them via its install layout instead, so this
+                    # prototype targets that (toolchain) scenario and turns
+                    # the at-desk copy off rather than hardcoding its target
+                    # list. This matches how other automation already builds
+                    # LLDB. Set here (once, on cmake_options itself) so both
+                    # the discovery and real configures below stay identical.
+                    cmake_options=(
+                        "${cmake_options[@]}"
+                        -DLLDB_FRAMEWORK_COPY_SWIFT_RESOURCES:BOOL=OFF
+                    )
+
+                    # Derived directly from the now fully-assembled
+                    # cmake_options -- the exact options the real LLDB
+                    # configure below will use -- plus the one flag that
+                    # switches it into discovery mode. This is deliberate:
+                    # it makes it structurally impossible for the discovery
+                    # and real configures to drift apart.
+                    discovery_build_dir="${lldb_build_dir}-discovery"
+                    discovery_cmake_options=(
+                        "${cmake_options[@]}"
+                        -DLLDB_DEPENDENCY_DISCOVERY_ONLY:BOOL=ON
+                    )
+
+                    call mkdir -p "${discovery_build_dir}"
+                    # Unlike the real configure below, always reconfigure:
+                    # a stale discovered target list would silently produce
+                    # a broken LLDB build, so correctness requires
+                    # re-deriving it every time instead of reusing a
+                    # previous configure.
+                    with_pushd "${discovery_build_dir}" \
+                        call env "${ENV_OPT_TERMINATOR[@]}" "${CMAKE}" "${discovery_cmake_options[@]}" "${EXTRA_CMAKE_OPTIONS[@]}" "${source_dir}"
+
+                    if [[ ! ${DRY_RUN} ]]; then
+                        discovered_llvm_file="${discovery_build_dir}/lldb-discovered-llvm-targets.txt"
+                        discovered_swift_file="${discovery_build_dir}/lldb-discovered-swift-targets.txt"
+
+                        discovered_llvm_targets=()
+                        while IFS= read -r discovered_target; do
+                            [[ -n "${discovered_target}" ]] && discovered_llvm_targets+=("${discovered_target}")
+                        done < "${discovered_llvm_file}"
+                        if [[ "${#discovered_llvm_targets[@]}" -eq 0 ]]; then
+                            echo "error: LLDB dependency discovery produced no LLVM/Clang targets (${discovered_llvm_file})" 1>&2
+                            exit 1
+                        fi
+                        call "${CMAKE_BUILD[@]}" "${llvm_build_dir}" -- "${BUILD_ARGS[@]}" "${discovered_llvm_targets[@]}"
+
+                        # Empty if LLDB_ENABLE_SWIFT_SUPPORT ended up OFF for
+                        # this configuration (e.g. a cross-compile host) --
+                        # not an error, just nothing to build here.
+                        discovered_swift_targets=()
+                        if [[ -f "${discovered_swift_file}" ]]; then
+                            while IFS= read -r discovered_target; do
+                                [[ -n "${discovered_target}" ]] && discovered_swift_targets+=("${discovered_target}")
+                            done < "${discovered_swift_file}"
+                        fi
+                        if [[ "${#discovered_swift_targets[@]}" -gt 0 ]]; then
+                            call "${CMAKE_BUILD[@]}" "${swift_build_dir}" -- "${BUILD_ARGS[@]}" "${discovered_swift_targets[@]}"
+                        fi
+
+                        # symlink_clang_headers is a genuine, necessary
+                        # prerequisite for the real LLDB configure below --
+                        # its output (lib/swift/clang) is what
+                        # source/API/CMakeLists.txt's copy-clang-resource-dir
+                        # looks for via a configure-time EXISTS() check -- but
+                        # it can never appear in the discovered target list
+                        # above. Discovery walks CMake target-graph edges
+                        # (LINK_LIBRARIES/MANUALLY_ADDED_DEPENDENCIES), and this
+                        # isn't one: it's the same kind of cross-project
+                        # filesystem check that LLDBStandalone.cmake's own
+                        # clang-resource-headers check relies on, for the same
+                        # reason (there's no such thing as a CMake target
+                        # dependency across two separate standalone CMake
+                        # projects). Today's build-everything flow never
+                        # notices because Swift is always fully built long
+                        # before LLDB's configure runs. This one target is
+                        # this flow's Swift-side analog of the LLVM-side
+                        # clang-resource-headers/intrinsics_gen bootstrap set
+                        # (see llvm.py's build_targets computation).
+                        call "${CMAKE_BUILD[@]}" "${swift_build_dir}" -- "${BUILD_ARGS[@]}" symlink_clang_headers
+                    fi
+                fi
+                # END SWIFT MOD
                 ;;
             llbuild)
                 cmake_options=(
@@ -2660,7 +2779,13 @@ for host in "${ALL_HOSTS[@]}"; do
         fi
 
         # Build.
-        if [[ $(not ${SKIP_BUILD}) ]]; then
+        # BEGIN SWIFT MOD
+        # skip_build_this_product is set above by the swift) case when
+        # LLDB_DEPENDENCY_DISCOVERY is on: Swift's real build is deferred
+        # until the lldb) case has run its discovery configure and built
+        # only the Swift targets LLDB actually needs.
+        if [[ $(not ${SKIP_BUILD}) && -z "${skip_build_this_product}" ]]; then
+        # END SWIFT MOD
             call "${CMAKE_BUILD[@]}" "${build_dir}" -- "${BUILD_ARGS[@]}" ${build_targets[@]}
         fi
     done

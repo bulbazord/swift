@@ -54,8 +54,16 @@ def _apply_default_arguments(args):
     # Build LLDB if any LLDB-related options were specified.
     if args.lldb_build_variant is not None or \
        args.lldb_assertions is not None or \
-       args.lldb_build_with_xcode is not None:
+       args.lldb_build_with_xcode is not None or \
+       args.lldb_dependency_discovery:
         args.build_lldb = True
+
+    # --lldb-dependency-discovery builds only the LLVM/Clang targets that
+    # LLDB's discovery configure says it needs, rather than all of LLVM/
+    # Clang up front, so skip the normal full LLVM/Clang build the same way
+    # --skip-build-llvm already does.
+    if args.lldb_dependency_discovery:
+        args.build_llvm = False
 
     # Build libc++ if fully static Linux was specified.
     if args.build_linux_static and args.build_libcxx is None:
@@ -1054,6 +1062,14 @@ def create_argument_parser():
     option('--lldb-build-with-cmake', store('lldb_build_with_xcode'),
            const='0',
            help='build LLDB using CMake')
+
+    option('--lldb-dependency-discovery', toggle_true('lldb_dependency_discovery'),
+           help='instead of building all of LLVM/Clang/Swift before LLDB, '
+                'configure LLDB in a discovery-only mode to find exactly '
+                'which of their targets LLDB needs, then build only those '
+                'before configuring and building LLDB for real. Implies '
+                '--skip-build-llvm, since LLVM/Clang are bootstrapped and '
+                'then built on demand instead')
 
     option('--debug-cmark', store('cmark_build_variant'),
            const='Debug',

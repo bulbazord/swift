@@ -257,6 +257,8 @@ class BuildScriptInvocation(object):
             os.environ['LSAN_OPTIONS'] = 'suppressions={}'.format(supp_file)
         if args.verbose_build:
             impl_args += ["--verbose-build"]
+        if args.lldb_dependency_discovery:
+            impl_args += ["--lldb-dependency-discovery"]
         if args.install_symroot:
             impl_args += [
                 "--install-symroot", os.path.abspath(args.install_symroot)
