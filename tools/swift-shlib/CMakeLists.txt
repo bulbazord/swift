@@ -1,9 +1,21 @@
 # Compute the LLVM libraries to include.
-llvm_map_components_to_libnames(llvm_libraries "all")
+# llvm_map_components_to_libnames(llvm_libraries "all")
+set(llvm_libraries)
+foreach(t ${LLVM_AVAILABLE_LIBS})
+  if (TARGET ${t})
+    get_target_property(_type ${t} TYPE)
+    if (_type STREQUAL "STATIC_LIBRARY" OR _type STREQUAL "OBJECT_LIBRARY")
+      list(APPEND llvm_libraries ${t})
+    endif()
+  endif()
+endforeach()
 # tblgen libraries are only useful for building. It serves no purpose in the
 # dylib.
-message(FATAL_ERROR "llvm libs: ${llvm_libraries}")
 list(REMOVE_ITEM llvm_libraries "LLVMTableGen")
+list(REMOVE_ITEM llvm_libraries "LLVMTableGenBasic")
+list(REMOVE_ITEM llvm_libraries "LLVMTableGenCommon")
+# LLVMOptDriver doesn't get linked into libLLVM, we don't link it either.
+list(REMOVE_ITEM llvm_libraries "LLVMOptDriver")
 list(REMOVE_DUPLICATES llvm_libraries)
 
 # Compute the clang libraries to include.
@@ -17,6 +29,10 @@ foreach(t ${CLANG_EXPORTED_TARGETS})
     endif()
   endif()
 endforeach()
+
+# clangTidyMain uses llvm's PluginLoader (which defines clOpt "load"). This
+# conflicts with the "load" we have in AArch64PointerAuth.h.
+list(REMOVE_ITEM clang_libraries "clangTidyMain")
 
 # Compute the swift libraries to include.
 set(_stdlib_suffixes)
@@ -112,3 +128,8 @@ foreach(lib ${swift_libraries})
 endforeach()
 
 target_link_libraries(SwiftCompilerShared PRIVATE ${link_args})
+
+set_property(
+  TARGET SwiftCompilerShared
+  APPEND PROPERTY INSTALL_RPATH "@loader_path/swift/host/compiler"
+)
